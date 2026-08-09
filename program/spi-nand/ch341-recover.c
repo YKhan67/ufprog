@@ -54,7 +54,6 @@ int main(void)
     ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
     if (ret) {
         fprintf(stderr, "open failed: %u\n", ret);
-        os_cleanup();
         return 1;
     }
 
@@ -89,7 +88,6 @@ int main(void)
     read_id(spi);
 
     ufprog_spi_close_device(spi);
-    os_cleanup();
 
     return 0;
 }

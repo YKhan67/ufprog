@@ -65,6 +65,7 @@ static int UFPROG_API ch341_libusb_try_match_open(void *priv, struct json_object
 
 	ret = libusb_open_matched(ufprog_global_libusb_context(), &info, dev_handle);
 	if (ret) {
+    	logm_err("libusb_open_matched failed: ret=%d (%s)\n", ret, libusb_strerror(ret));
 		if (index >= 0)
 			logm_dbg("Failed to open device specified by match#%u\n", index);
 		else

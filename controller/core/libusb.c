@@ -112,9 +112,13 @@ ufprog_status UFPROG_API libusb_open_matched(struct libusb_context *ctx, const s
 			}
 		}
 
+		printf(">>> TRYING libusb_open %04x:%04x\n", desc.idVendor, desc.idProduct);
+		fflush(stdout);
 		ret = libusb_open(udevs[i], &dev_handle);
+		printf(">>> libusb_open returned %d\n", ret);
+		fflush(stdout);
 		if (ret < 0) {
-			log_errdbg("Failed to open device: %s\n", libusb_strerror(ret));
+			log_err("FAILED libusb_open: ret=%d (%s)\n", ret, libusb_strerror(ret));
 			continue;
 		}
 

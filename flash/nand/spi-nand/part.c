@@ -131,20 +131,29 @@ void spi_nand_blank_part_fill_default_opcodes(struct spi_nand_flash_part_blank *
 }
 
 const struct spi_nand_flash_part *spi_nand_find_part(const struct spi_nand_flash_part *parts, size_t count,
-						     enum spi_nand_id_type type, const uint8_t *id)
+                                                        enum spi_nand_id_type type, const uint8_t *id)
 {
-	size_t i;
+    size_t i;
 
-	if (!parts || !count)
-		return NULL;
+    logm_notice("SPI-NAND READ ID: %02X %02X %02X %02X\n", id[0], id[1], id[2], id[3]);
 
-	for (i = 0; i < count; i++) {
-		if (parts[i].id.type == type && parts[i].id.val.len &&
-		    !memcmp(parts[i].id.val.id, id, parts[i].id.val.len))
-			return &parts[i];
-	}
+    if (!parts || !count)
+        return NULL;
 
-	return NULL;
+    for (i = 0; i < count; i++) {
+        if (parts[i].id.type == type && parts[i].id.val.len) {
+            logm_notice("SPI-NAND MATCH: %s type=%d len=%u expected=%02X %02X actual=%02X %02X\n",
+                        parts[i].model, parts[i].id.type, parts[i].id.val.len,
+                        parts[i].id.val.id[0],
+                        parts[i].id.val.len > 1 ? parts[i].id.val.id[1] : 0,
+                        id[0], id[1]);
+
+            if (memcmp(parts[i].id.val.id, id, parts[i].id.val.len) == 0)
+                return &parts[i];
+        }
+    }
+
+    return NULL;
 }
 
 const struct spi_nand_flash_part *spi_nand_find_part_by_name(const struct spi_nand_flash_part *parts, size_t count,

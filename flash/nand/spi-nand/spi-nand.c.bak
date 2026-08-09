@@ -236,18 +236,9 @@ ufprog_status spi_nand_set_feature(struct spi_nand *snand, uint32_t addr, uint8_
 
 static ufprog_status spi_nand_read_id(struct spi_nand *snand, uint8_t *id, uint32_t len)
 {
-    struct ufprog_spi_mem_op op = SNAND_READ_ID_OP(len, 1, id);
-    ufprog_status ret;
-    uint32_t i;
+	struct ufprog_spi_mem_op op = SNAND_READ_ID_OP(len, 1, id);
 
-    ret = ufprog_spi_mem_exec_op(snand->spi, &op);
-
-    printf("SPI-NAND RAW ID:");
-    for (i = 0; i < len; i++)
-        printf(" %02X", id[i]);
-    printf("\n");
-
-    return ret;
+	return ufprog_spi_mem_exec_op(snand->spi, &op);
 }
 
 static ufprog_status spi_nand_read_id_direct(struct spi_nand *snand, uint8_t *id, uint32_t len)
@@ -627,13 +618,7 @@ static bool spi_nand_probe_jedec_id_retry(struct spi_nand *snand, struct spi_nan
 			continue;
 		}
 
-		
-            {
-                    char idstr[64] = {0};
-                    bin_to_hex_str(idstr, sizeof(idstr), snand->nand.id.id, SPI_NAND_ID_LEN, true, true);
-                    logm_notice("SPI-NAND raw ID type=%d: %s\n", type, idstr);
-            }
-probed = spi_nand_find_vendor_part(type, snand->nand.id.id, retvp);
+		probed = spi_nand_find_vendor_part(type, snand->nand.id.id, retvp);
 		if (probed) {
 			snand->nand.id.len = retvp->part->id.val.len;
 			return true;

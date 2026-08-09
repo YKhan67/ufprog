@@ -18,6 +18,9 @@ add_executable(ufsnandtest ufsnandtest.c ${ufsnandprog_common_src})
 target_compile_definitions(ufsnandtest PRIVATE UFP_VERSION=\"${UFPROG_VERSION_MAJOR}.${UFPROG_VERSION_MINOR}\")
 target_link_libraries(ufsnandtest PRIVATE ufprog_spi_nand ufprog_nand_core ufprog_spi ufprog_common)
 
+add_executable(ch341-nand-recover ch341-recover.c)
+target_link_libraries(ch341-nand-recover PRIVATE ufprog_spi_nand ufprog_nand_core ufprog_spi ufprog_common)
+
 include_directories(${ufprog_common_SOURCE_DIR}/include)
 include_directories(${ufprog_controller_SOURCE_DIR}/include)
 include_directories(${ufprog_spi_SOURCE_DIR}/include)

@@ -1,324 +1,255 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <string.h>
-
-#ifdef _WIN32
 #include <windows.h>
-#endif
 
 #include <ufprog/osdef.h>
 #include <ufprog/log.h>
 #include <ufprog/spi.h>
 
-#define PAGE_READ       0x13
-#define READ_FROM_CACHE 0x03
-#define RESET           0xFF
-#define GET_FEATURE     0x0F
-
-#define REG_STATUS      0xC0
-
-#define STATUS_OIP      0x01
-#define STATUS_ECC_MASK 0x30
-
-static ufprog_status xfer(struct ufprog_spi *spi,
-			  struct ufprog_spi_transfer *xfer,
-			  size_t count)
+static int transfer(struct ufprog_spi *spi,
+const uint8_t *tx, size_t txlen,
+uint8_t *rx, size_t rxlen)
 {
-	return ufprog_spi_generic_xfer(spi, xfer, count);
+struct ufprog_spi_transfer xfer[2] = {0};
+unsigned n = 0;
+
+if (txlen) {
+    xfer[n].buf.tx = tx;
+    xfer[n].len = txlen;
+    xfer[n].dir = SPI_DATA_OUT;
+    xfer[n].end = !rxlen;
+    n++;
 }
 
-static ufprog_status send_cmd(struct ufprog_spi *spi,
-			      uint8_t cmd)
-{
-	struct ufprog_spi_transfer t = {0};
-
-	t.dir = SPI_DATA_OUT;
-	t.buf.tx = &cmd;
-	t.len = 1;
-	t.end = true;
-
-	return xfer(spi, &t, 1);
+if (rxlen) {
+    xfer[n].buf.rx = rx;
+    xfer[n].len = rxlen;
+    xfer[n].dir = SPI_DATA_IN;
+    xfer[n].end = true;
+    n++;
 }
 
-static ufprog_status read_feature(struct ufprog_spi *spi,
-				  uint8_t addr,
-				  uint8_t *value)
-{
-	uint8_t tx[2] = {
-		GET_FEATURE,
-		addr
-	};
+return ufprog_spi_generic_xfer(spi, xfer, n);
 
-	struct ufprog_spi_transfer t[2] = {0};
-
-	t[0].dir = SPI_DATA_OUT;
-	t[0].buf.tx = tx;
-	t[0].len = sizeof(tx);
-	t[0].end = false;
-
-	t[1].dir = SPI_DATA_IN;
-	t[1].buf.rx = value;
-	t[1].len = 1;
-	t[1].end = true;
-
-	return xfer(spi, t, 2);
 }
 
-static ufprog_status wait_ready(struct ufprog_spi *spi,
-				uint8_t *final_status)
+static int command(struct ufprog_spi *spi, uint8_t opcode)
 {
-	uint8_t status = 0;
-
-	for (unsigned i = 0; i < 1000; i++) {
-		ufprog_status ret;
-
-		ret = read_feature(spi, REG_STATUS, &status);
-		if (ret)
-			return ret;
-
-		if (!(status & STATUS_OIP)) {
-			if (final_status)
-				*final_status = status;
-
-			return UFP_OK;
-		}
-
-		Sleep(1);
-	}
-
-	if (final_status)
-		*final_status = status;
-
-	return UFP_TIMEOUT;
+return transfer(spi, &opcode, 1, NULL, 0);
 }
 
-static ufprog_status page_read(struct ufprog_spi *spi,
-			       uint32_t page,
-			       uint8_t *status)
+static int read_feature(struct ufprog_spi *spi, uint8_t addr,
+const char *name, uint8_t *value)
 {
-	uint8_t tx[4];
+uint8_t tx[2] = {0x0F, addr};
+uint8_t rx = 0;
 
-	/*
-	 * SPI-NAND PAGE READ:
-	 *
-	 *     13h
-	 *     row address [23:0]
-	 */
-	tx[0] = PAGE_READ;
-	tx[1] = (uint8_t)(page >> 16);
-	tx[2] = (uint8_t)(page >> 8);
-	tx[3] = (uint8_t)page;
-
-	struct ufprog_spi_transfer t = {0};
-
-	t.dir = SPI_DATA_OUT;
-	t.buf.tx = tx;
-	t.len = sizeof(tx);
-	t.end = true;
-
-	ufprog_status ret = xfer(spi, &t, 1);
-
-	if (ret)
-		return ret;
-
-	return wait_ready(spi, status);
+if (transfer(spi, tx, sizeof(tx), &rx, 1)) {
+    printf("%s: READ FAILED\n", name);
+    return -1;
 }
 
-static ufprog_status read_cache(struct ufprog_spi *spi,
-				uint16_t column,
-				uint8_t *data,
-				size_t len)
-{
-	/*
-	 * READ FROM CACHE:
-	 *
-	 *     03h
-	 *     column address [15:0]
-	 *     data
-	 *
-	 * Keep command/address/read under one CS assertion.
-	 */
-	uint8_t tx[3];
+*value = rx;
 
-	tx[0] = READ_FROM_CACHE;
-	tx[1] = (uint8_t)(column >> 8);
-	tx[2] = (uint8_t)column;
+printf("%-18s: %02X\n", name, rx);
+return 0;
 
-	struct ufprog_spi_transfer t[2] = {0};
-
-	t[0].dir = SPI_DATA_OUT;
-	t[0].buf.tx = tx;
-	t[0].len = sizeof(tx);
-	t[0].end = false;
-
-	t[1].dir = SPI_DATA_IN;
-	t[1].buf.rx = data;
-	t[1].len = len;
-	t[1].end = true;
-
-	return xfer(spi, t, 2);
 }
 
-static void dump_data(const uint8_t *data, size_t len)
+static int write_enable(struct ufprog_spi *spi)
 {
-	for (size_t i = 0; i < len; i++) {
-		if ((i % 16) == 0)
-			printf("%04X: ", (unsigned)i);
+uint8_t value;
 
-		printf("%02X ", data[i]);
-
-		if ((i % 16) == 15)
-			printf("\n");
-	}
-
-	if (len % 16)
-		printf("\n");
+if (command(spi, 0x06)) {
+    printf("WRITE ENABLE failed\n");
+    return -1;
 }
 
-static void analyse_data(const uint8_t *data, size_t len)
-{
-	size_t zero = 0;
-	size_t ff = 0;
+if (read_feature(spi, 0xC0, "Status", &value))
+    return -1;
 
-	for (size_t i = 0; i < len; i++) {
-		if (data[i] == 0x00)
-			zero++;
+printf("WEL = %u\n", (value >> 1) & 1);
 
-		if (data[i] == 0xFF)
-			ff++;
-	}
+return ((value & 0x02) != 0) ? 0 : -1;
 
-	printf("Statistics: %zu/%zu = 0x00, %zu/%zu = 0xFF\n",
-	       zero, len, ff, len);
-
-	if (zero == len)
-		printf("RESULT: ALL ZEROES\n");
-	else if (ff == len)
-		printf("RESULT: ALL FF\n");
-	else
-		printf("RESULT: NON-UNIFORM DATA\n");
 }
 
-static void test_page(struct ufprog_spi *spi, uint32_t page)
+static int set_feature(struct ufprog_spi *spi, uint8_t addr, uint8_t value)
 {
-	uint8_t data[64];
-	uint8_t status = 0;
-	ufprog_status ret;
+uint8_t tx[3] = {0x1F, addr, value};
 
-	memset(data, 0, sizeof(data));
+return transfer(spi, tx, sizeof(tx), NULL, 0);
 
-	printf("\n========================================\n");
-	printf("PAGE %u\n", page);
-	printf("========================================\n");
+}
 
-	printf("PAGE READ 13h...\n");
+static int wait_ready(struct ufprog_spi *spi)
+{
+unsigned i;
+uint8_t status;
 
-	ret = page_read(spi, page, &status);
+for (i = 0; i < 1000; i++) {
+    if (read_feature(spi, 0xC0, "Status", &status))
+        return -1;
 
-	if (ret) {
-		printf("PAGE READ FAILED: %u\n", ret);
-		return;
-	}
+    if (!(status & 0x01))
+        return 0;
 
-	printf("PAGE READ COMPLETE\n");
-	printf("STATUS: %02X\n", status);
+    Sleep(1);
+}
 
-	printf("OIP: %s\n",
-	       (status & STATUS_OIP) ? "BUSY" : "READY");
+printf("TIMEOUT waiting for ready\n");
+return -1;
 
-	printf("ECC bits: %02X\n",
-	       status & STATUS_ECC_MASK);
+}
 
-	printf("\nREAD CACHE 03h...\n");
+static int read_id(struct ufprog_spi *spi)
+{
+uint8_t tx = 0x9F;
+uint8_t rx[8] = {0};
 
-	ret = read_cache(spi, 0x0000, data, sizeof(data));
+if (transfer(spi, &tx, 1, rx, sizeof(rx))) {
+    printf("READ ID failed\n");
+    return -1;
+}
 
-	if (ret) {
-		printf("READ CACHE FAILED: %u\n", ret);
-		return;
-	}
+printf("ID:");
+for (unsigned i = 0; i < sizeof(rx); i++)
+    printf(" %02X", rx[i]);
+printf("\n");
 
-	printf("FIRST 64 BYTES:\n");
-	dump_data(data, sizeof(data));
+return 0;
 
-	analyse_data(data, sizeof(data));
+}
+
+static void dump_result(const char *label, uint8_t value)
+{
+printf("%s = %02X\n", label, value);
 }
 
 int wmain(void)
 {
-	struct ufprog_spi *spi = NULL;
-	ufprog_status ret;
-	uint8_t value;
+struct ufprog_spi *spi = NULL;
+ufprog_status ret;
+uint8_t original_b0 = 0;
+uint8_t test_b0;
+uint8_t status;
 
-	set_os_default_log_print();
-	os_init();
+set_os_default_log_print();
+os_init();
 
-	printf("=== ESMT F50L1G41LB NAND ARRAY READ TEST ===\n");
-	printf("READ ONLY - NO PROGRAM / NO ERASE / NO WRITE ENABLE\n\n");
+printf("=== ESMT F50L1G41LB FEATURE / DEVICE RESPONSE TEST ===\n");
+printf("NO PROGRAM / NO ERASE\n\n");
 
-	ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
+ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
+if (ret) {
+    fprintf(stderr, "open failed: %u\n", ret);
+    return 1;
+}
 
-	if (ret) {
-		fprintf(stderr, "open failed: %u\n", ret);
-		return 1;
-	}
+printf("RESET\n");
 
-	ret = ufprog_spi_set_cs_pol(spi, false);
+if (command(spi, 0xFF)) {
+    printf("RESET FAILED\n");
+    ufprog_spi_close_device(spi);
+    return 1;
+}
 
-	if (ret)
-		printf("CS polarity setup failed: %u\n", ret);
+Sleep(2);
 
-	printf("RESET\n");
+printf("RESET OK\n\n");
 
-	ret = send_cmd(spi, RESET);
+printf("FEATURES BEFORE TEST\n");
 
-	if (ret) {
-		printf("RESET FAILED: %u\n", ret);
-		return 1;
-	}
+if (read_feature(spi, 0xA0, "Protection (A0)", &status))
+    goto cleanup;
 
-	ret = wait_ready(spi, &value);
+if (read_feature(spi, 0xB0, "Configuration (B0)", &original_b0))
+    goto cleanup;
 
-	if (ret) {
-		printf("RESET WAIT FAILED: %u\n", ret);
-		return 1;
-	}
+if (read_feature(spi, 0xC0, "Status (C0)", &status))
+    goto cleanup;
 
-	printf("RESET OK\n");
+printf("\n");
 
-	printf("\nINITIAL STATUS\n");
+printf("READ ID BEFORE FEATURE TEST\n");
+read_id(spi);
 
-	ret = read_feature(spi, 0xA0, &value);
-	if (!ret)
-		printf("A0 Protection:    %02X\n", value);
+printf("\n");
+printf("========================================\n");
+printf("SAFE FEATURE WRITE / READBACK TEST\n");
+printf("========================================\n\n");
 
-	ret = read_feature(spi, 0xB0, &value);
-	if (!ret)
-		printf("B0 Configuration: %02X\n", value);
+/*
+ * B0 is the configuration register.
+ *
+ * We first verify that the device accepts WREN and that the WEL
+ * bit changes. Then we write the same B0 value back to the device.
+ *
+ * This deliberately does NOT touch NAND array data.
+ */
 
-	ret = read_feature(spi, 0xC0, &value);
-	if (!ret)
-		printf("C0 Status:        %02X\n", value);
+test_b0 = original_b0;
 
-	/*
-	 * Read several pages.
-	 *
-	 * These are PAGE READ operations only.
-	 * They do not modify the NAND array.
-	 */
-	test_page(spi, 0);
-	test_page(spi, 1);
-	test_page(spi, 2);
-	test_page(spi, 10);
+printf("Original B0: %02X\n", original_b0);
+printf("Test B0:     %02X\n\n", test_b0);
 
-	printf("\nFINAL STATUS\n");
+printf("WRITE ENABLE\n");
 
-	ret = read_feature(spi, 0xC0, &value);
+if (write_enable(spi)) {
+    printf("WRITE ENABLE / WEL TEST FAILED\n");
+    goto cleanup;
+}
 
-	if (!ret)
-		printf("C0 Status: %02X\n", value);
+printf("\nSET FEATURE B0 = %02X\n", test_b0);
 
-	printf("\n=== TEST COMPLETE ===\n");
+if (set_feature(spi, 0xB0, test_b0)) {
+    printf("SET FEATURE failed\n");
+    goto cleanup;
+}
 
-	return 0;
+if (wait_ready(spi))
+    goto cleanup;
+
+printf("\nVERIFY B0\n");
+
+if (read_feature(spi, 0xB0, "Configuration (B0)", &status))
+    goto cleanup;
+
+dump_result("B0 readback", status);
+
+if (status == original_b0)
+    printf("B0 WRITE/READBACK VERIFIED\n");
+else
+    printf("B0 WRITE/READBACK MISMATCH\n");
+
+printf("\nREAD ID AFTER FEATURE WRITE\n");
+read_id(spi);
+
+printf("\nRESET\n");
+
+if (command(spi, 0xFF)) {
+    printf("RESET FAILED\n");
+    goto cleanup;
+}
+
+Sleep(2);
+
+printf("RESET OK\n\n");
+
+printf("FINAL FEATURES\n");
+
+read_feature(spi, 0xA0, "Protection (A0)", &status);
+read_feature(spi, 0xB0, "Configuration (B0)", &status);
+read_feature(spi, 0xC0, "Status (C0)", &status);
+
+printf("\nFINAL READ ID\n");
+read_id(spi);
+
+cleanup:
+ufprog_spi_close_device(spi);
+
+printf("\n=== TEST COMPLETE ===\n");
+
+return 0;
+
 }

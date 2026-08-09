@@ -365,17 +365,22 @@ ufprog_status UFPROG_API os_load_module(const char *module_path, module_handle *
 
 	pwsModule = utf8_to_wcs(module_path);
 	if (!pwsModule)
-		return UFP_NOMEM;
+		return UFP_NOMEM;	
 
 	hModule = LoadLibraryW(pwsModule);
 	free(pwsModule);
 
 	if (!hModule) {
-		if (GetLastError() == ERROR_MOD_NOT_FOUND)
-			return UFP_FILE_NOT_EXIST;
+    	DWORD err = GetLastError();
 
-		return UFP_FAIL;
-	}
+    	log_err("LoadLibraryW failed for '%s': Windows error %lu\n",
+        	    module_path, (unsigned long)err);
+
+    	if (err == ERROR_MOD_NOT_FOUND)
+        	return UFP_FILE_NOT_EXIST;
+
+    	return UFP_FAIL;
+}
 
 	*handle = (module_handle)hModule;
 

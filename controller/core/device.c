@@ -189,9 +189,9 @@ valid_if_type:
 
 	ret = data->dev->driver->open_device(data->dev->if_type, jconfig, data->thread_safe, &data->dev->ifdev);
 	if (ret) {
-		log_err("Failed to open interface device using '%s'\n", config_path);
-		data->dev->ifdev = NULL;
-		goto cleanup;
+    	log_err("Failed to open interface device using '%s': ret=%d\n", config_path, ret);
+    	data->dev->ifdev = NULL;
+    	goto cleanup;
 	}
 
 	free(config_path);

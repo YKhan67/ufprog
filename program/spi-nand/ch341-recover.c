@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <ufprog/spi.h>
+#include <ufprog/osdef.h>
 
 static ufprog_status xfer(struct ufprog_spi *spi,
                           const uint8_t *tx, uint8_t *rx, size_t len)
@@ -67,6 +68,9 @@ int wmain(void)
     uint8_t sr = 0;
     uint8_t id[4] = {0};
     uint8_t tx[2] = {0x9F, 0};
+
+    set_os_default_log_print();
+    os_init();
 
     ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
     if (ret) {

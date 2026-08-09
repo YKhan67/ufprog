@@ -7,27 +7,15 @@
 
 static int cmd(struct ufprog_spi *spi, uint8_t opcode)
 {
-    struct ufprog_spi_transfer xfer = {0};
-
-    xfer.tx = &opcode;
-    xfer.len = 1;
-
-    return ufprog_spi_transfer(spi, &xfer, 1);
+    return ufprog_spi_sio_write(spi, &opcode, 1);
 }
 
 static int read_feature(struct ufprog_spi *spi, uint8_t addr)
 {
     uint8_t tx[2] = {0x0F, addr};
     uint8_t rx = 0;
-    struct ufprog_spi_transfer xfer[2] = {0};
 
-    xfer[0].tx = tx;
-    xfer[0].len = 2;
-
-    xfer[1].rx = &rx;
-    xfer[1].len = 1;
-
-    if (ufprog_spi_transfer(spi, xfer, 2)) {
+    if (ufprog_spi_sio_write_then_read(spi, tx, sizeof(tx), &rx, 1)) {
         printf("READ FEATURE failed\n");
         return -1;
     }
@@ -41,15 +29,8 @@ static int read_id(struct ufprog_spi *spi)
 {
     uint8_t tx = 0x9F;
     uint8_t rx[8] = {0};
-    struct ufprog_spi_transfer xfer[2] = {0};
 
-    xfer[0].tx = &tx;
-    xfer[0].len = 1;
-
-    xfer[1].rx = rx;
-    xfer[1].len = sizeof(rx);
-
-    if (ufprog_spi_transfer(spi, xfer, 2)) {
+    if (ufprog_spi_sio_write_then_read(spi, &tx, 1, rx, sizeof(rx))) {
         printf("READ ID failed\n");
         return -1;
     }
@@ -73,6 +54,7 @@ int main(void)
     ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
     if (ret) {
         fprintf(stderr, "open failed: %u\n", ret);
+        os_cleanup();
         return 1;
     }
 
@@ -106,7 +88,7 @@ int main(void)
     printf("\nREAD ID again\n");
     read_id(spi);
 
-    ufprog_spi_free(spi);
+    ufprog_spi_close_device(spi);
     os_cleanup();
 
     return 0;

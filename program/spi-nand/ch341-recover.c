@@ -43,7 +43,7 @@ static int read_id(struct ufprog_spi *spi)
     return 0;
 }
 
-int main(void)
+int wmain(void)
 {
     struct ufprog_spi *spi = NULL;
     ufprog_status ret;

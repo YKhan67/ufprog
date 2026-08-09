@@ -174,7 +174,7 @@ int wmain(void)
 
 	printf("\nINITIAL FEATURES\n");
 
-	get_feature(spi, 0xA0, "Protection");
+	get_feature(spi, 0xA0, "Protection", &value);
 	get_feature(spi, 0xB0, "Configuration", &original_b0);
 	get_feature(spi, 0xC0, "Status", &sr);
 

@@ -246,6 +246,7 @@ static int UFPROG_API dir_enum_plugins(void *priv, uint32_t index, const char *d
 
 	ret = os_load_module(module_path, &plugin_priv->plugin->module);
 	if (ret) {
+    	log_err("os_load_module FAILED: %s ret=%d\n", module_path, ret);
 		if (ret == UFP_FILE_NOT_EXIST)
 			log_dbg("'%s' does not exist\n", module_path);
 
@@ -255,6 +256,7 @@ static int UFPROG_API dir_enum_plugins(void *priv, uint32_t index, const char *d
 
 	ret = plugin_check(plugin_priv->pluginmgmt, plugin_priv->plugin, module_path);
 	if (!ret) {
+    	log_dbg("plugin_check PASSED: %s\n", module_path);
 		log_notice("'%s' loaded as %s plugin\n", module_path, plugin_priv->pluginmgmt->name);
 		eret = 1;
 	} else {

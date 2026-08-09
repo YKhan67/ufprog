@@ -1,132 +1,113 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-#include <ufprog/spi.h>
+
 #include <ufprog/osdef.h>
+#include <ufprog/log.h>
+#include <ufprog/spi.h>
 
-static ufprog_status xfer(struct ufprog_spi *spi,
-                          const uint8_t *tx, uint8_t *rx, size_t len)
+static int cmd(struct ufprog_spi *spi, uint8_t opcode)
 {
-    struct ufprog_spi_transfer x = {0};
+    struct ufprog_spi_transfer xfer = {0};
 
-    x.buswidth = 1;
-    x.dtr = false;
-    x.len = len;
+    xfer.tx = &opcode;
+    xfer.len = 1;
 
-    if (tx) {
-        x.dir = SPI_DATA_OUT;
-        x.buf.tx = tx;
-    } else {
-        x.dir = SPI_DATA_IN;
-        x.buf.rx = rx;
+    return ufprog_spi_transfer(spi, &xfer, 1);
+}
+
+static int read_feature(struct ufprog_spi *spi, uint8_t addr)
+{
+    uint8_t tx[2] = {0x0F, addr};
+    uint8_t rx = 0;
+    struct ufprog_spi_transfer xfer[2] = {0};
+
+    xfer[0].tx = tx;
+    xfer[0].len = 2;
+
+    xfer[1].rx = &rx;
+    xfer[1].len = 1;
+
+    if (ufprog_spi_transfer(spi, xfer, 2)) {
+        printf("READ FEATURE failed\n");
+        return -1;
     }
 
-    x.end = true;
+    printf("FEATURE %02X = %02X\n", addr, rx);
 
-    return ufprog_spi_generic_xfer(spi, &x, 1);
+    return 0;
 }
 
-static ufprog_status cmd(struct ufprog_spi *spi, uint8_t opcode)
+static int read_id(struct ufprog_spi *spi)
 {
-    return xfer(spi, &opcode, NULL, 1);
+    uint8_t tx = 0x9F;
+    uint8_t rx[8] = {0};
+    struct ufprog_spi_transfer xfer[2] = {0};
+
+    xfer[0].tx = &tx;
+    xfer[0].len = 1;
+
+    xfer[1].rx = rx;
+    xfer[1].len = sizeof(rx);
+
+    if (ufprog_spi_transfer(spi, xfer, 2)) {
+        printf("READ ID failed\n");
+        return -1;
+    }
+
+    printf("ID:");
+    for (unsigned i = 0; i < sizeof(rx); i++)
+        printf(" %02X", rx[i]);
+    printf("\n");
+
+    return 0;
 }
 
-static ufprog_status read_status(struct ufprog_spi *spi, uint8_t reg, uint8_t *val)
-{
-    uint8_t tx[2] = { 0x0F, reg };
-    uint8_t rx[2] = { 0 };
-
-    struct ufprog_spi_transfer x[2] = {0};
-
-    x[0].buswidth = 1;
-    x[0].dtr = false;
-    x[0].dir = SPI_DATA_OUT;
-    x[0].buf.tx = tx;
-    x[0].len = sizeof(tx);
-    x[0].end = false;
-
-    x[1].buswidth = 1;
-    x[1].dtr = false;
-    x[1].dir = SPI_DATA_IN;
-    x[1].buf.rx = rx;
-    x[1].len = 1;
-    x[1].end = true;
-
-    ufprog_status ret = ufprog_spi_generic_xfer(spi, x, 2);
-
-    if (!ret)
-        *val = rx[0];
-
-    return ret;
-}
-
-int wmain(void)
+int main(void)
 {
     struct ufprog_spi *spi = NULL;
     ufprog_status ret;
-    uint8_t sr = 0;
-    uint8_t id[4] = {0};
-    uint8_t tx[2] = {0x9F, 0};
 
     set_os_default_log_print();
     os_init();
 
     ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
     if (ret) {
-        fprintf(stderr, "open failed: %d\n", ret);
+        fprintf(stderr, "open failed: %u\n", ret);
         return 1;
     }
 
-    ufprog_spi_set_speed(spi, 500000, NULL);
-    ufprog_spi_set_cs_pol(spi, false);
+    printf("=== SPI-NAND diagnostic ===\n");
 
-    printf("RESET...\n");
-    cmd(spi, 0xFF);
-    cmd(spi, 0xFF);
+    ret = ufprog_spi_set_cs_pol(spi, false);
+    if (ret)
+        printf("set CS polarity failed: %u\n", ret);
 
-    printf("READ ID...\n");
-
-    struct ufprog_spi_transfer x[2] = {0};
-
-    x[0].buswidth = 1;
-    x[0].dtr = false;
-    x[0].dir = SPI_DATA_OUT;
-    x[0].buf.tx = tx;
-    x[0].len = 1;
-    x[0].end = false;
-
-    x[1].buswidth = 1;
-    x[1].dtr = false;
-    x[1].dir = SPI_DATA_IN;
-    x[1].buf.rx = id;
-    x[1].len = 4;
-    x[1].end = true;
-
-    ret = ufprog_spi_generic_xfer(spi, x, 2);
-
-    if (!ret)
-        printf("ID: %02X %02X %02X %02X\n",
-               id[0], id[1], id[2], id[3]);
-
-    printf("STATUS 0xC0...\n");
-    if (!read_status(spi, 0xC0, &sr))
-        printf("SR-C0: %02X\n", sr);
-
-    printf("RESET...\n");
+    printf("\nRESET 1\n");
     cmd(spi, 0xFF);
 
-    printf("WRITE ENABLE...\n");
-    cmd(spi, 0x06);
-
-    printf("RESET...\n");
+    printf("RESET 2\n");
     cmd(spi, 0xFF);
 
-    printf("STATUS 0xC0...\n");
-    if (!read_status(spi, 0xC0, &sr))
-        printf("SR-C0: %02X\n", sr);
+    printf("\nSTATUS C0\n");
+    read_feature(spi, 0xC0);
 
-    ufprog_spi_close_device(spi);
+    printf("\nREAD ID\n");
+    read_id(spi);
 
-    return ret ? 1 : 0;
+    printf("\nSTATUS C0 again\n");
+    read_feature(spi, 0xC0);
+
+    printf("\nRESET again\n");
+    cmd(spi, 0xFF);
+
+    printf("\nSTATUS C0 after reset\n");
+    read_feature(spi, 0xC0);
+
+    printf("\nREAD ID again\n");
+    read_id(spi);
+
+    ufprog_spi_free(spi);
+    os_cleanup();
+
+    return 0;
 }

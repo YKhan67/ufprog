@@ -6,9 +6,10 @@
  *
  * IMPORTANT:
  *
- * READ ID uses the hardware SPI sequence:
+ * READ ID uses the SPI-MEM sequence specified by the
+ * F50L1G41LB datasheet:
  *
- *     9Fh + 00h(dummy) + clock ID bytes
+ *     9Fh + 00h address + clock ID bytes
  *
  * Expected ID:
  *
@@ -27,7 +28,7 @@
  *     1. Open CH341
  *     2. Reset NAND
  *     3. Check ready/status
- *     4. READ ID using 9F + 00 dummy
+ *     4. READ ID using SPI-MEM 9F + 00 address
  *     5. Read feature registers A0/B0/C0
  *     6. Decode C0
  *     7. Variable-length ID-clock test
@@ -289,29 +290,57 @@ static int wait_ready(struct ufprog_spi *spi,
 /* ============================================================
  * READ ID
  *
- * F50L1G41LB READ-ID hardware SPI sequence:
+ * F50L1G41LB READ-ID sequence:
  *
  *     9Fh
- *     00h dummy byte
+ *     00h address
  *     ID clocks
  *
- * The complete SPI transaction is:
+ * Datasheet command definition:
  *
- *     TX: 9F 00 00 00 00 00
- *     RX: -- -- ID ID ID ID ID
+ *     READ ID
+ *     Opcode : 9Fh
+ *     Address: 1 byte
+ *     Dummy  : 0 bytes
+ *     Data   : 2 or more bytes
  *
- * The first two transmitted bytes are command + dummy.
- * The received bytes are captured only after those two
- * transmitted bytes.
+ * The address must be 00h to obtain the JEDEC/product ID.
+ *
+ * This implementation deliberately uses the UFPROG
+ * SPI-MEM API instead of manually splitting the transaction
+ * into generic TX/RX phases. This keeps command, address and
+ * data within one SPI-MEM operation and therefore preserves
+ * the intended chip-select transaction.
  * ============================================================ */
 
 static int read_id(struct ufprog_spi *spi,
                    uint8_t *id,
                    size_t id_len)
 {
-    uint8_t tx[2] = {
-        CMD_READ_ID,
-        0x00
+    struct ufprog_spi_mem_op op = {
+        .cmd = {
+            .opcode = CMD_READ_ID,
+            .len = 1,
+            .buswidth = 1,
+        },
+
+        .addr = {
+            .val = 0x00,
+            .len = 1,
+            .buswidth = 1,
+        },
+
+        .dummy = {
+            .len = 0,
+            .buswidth = 1,
+        },
+
+        .data = {
+            .dir = SPI_DATA_IN,
+            .len = id_len,
+            .buf.rx = id,
+            .buswidth = 1,
+        },
     };
 
     if (!id || !id_len)
@@ -324,11 +353,12 @@ static int read_id(struct ufprog_spi *spi,
            0,
            id_len);
 
-    if (transfer(spi,
-                 tx,
-                 sizeof(tx),
-                 id,
-                 id_len))
+    if (!ufprog_spi_mem_supports_op(spi,
+                                    &op))
+        return -1;
+
+    if (ufprog_spi_mem_exec_op(spi,
+                                &op))
         return -1;
 
     return 0;
@@ -380,7 +410,7 @@ static int diagnostic_id(struct ufprog_spi *spi)
     uint8_t id[5] = {0};
 
     printf("\n");
-    printf("READ ID command: 9Fh + 00h dummy\n");
+    printf("READ ID command: 9Fh + 00h address\n");
 
     if (read_id(spi,
                 id,
@@ -490,7 +520,7 @@ static int variable_length_id_test(struct ufprog_spi *spi)
 {
     printf("\n");
 
-    printf("Variable-length READ ID test using 9Fh + 00h dummy...\n");
+    printf("Variable-length READ ID test using 9Fh + 00h address...\n");
 
     for (unsigned len = 1;
          len <= 16;

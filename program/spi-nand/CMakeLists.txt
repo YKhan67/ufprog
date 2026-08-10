@@ -28,11 +28,22 @@ add_executable(ch341-nand-recover
     ch341-recover.c
 )
 
-
 add_executable(ch341-nand-id-test
     ch341-nand-id-test.c
 )
 
+add_executable(ch341-nand-program
+    ch341-nand-program.c
+)
+
+target_link_libraries(ch341-nand-program
+    PRIVATE
+        ${CMAKE_BINARY_DIR}/flash/nand/spi-nand/libufprog-spi-nand.dll.a
+        ${CMAKE_BINARY_DIR}/flash/nand/core/libufprog-nand-core.dll.a
+        ${CMAKE_BINARY_DIR}/interface/spi/libufprog-spi.dll.a
+        ${CMAKE_BINARY_DIR}/controller/core/libufprog-controller.dll.a
+        ${CMAKE_BINARY_DIR}/common/libufprog-common.dll.a
+)
 
 target_link_libraries(ch341-nand-id-test
     PRIVATE

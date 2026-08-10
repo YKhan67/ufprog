@@ -1,255 +1,742 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <windows.h>
 
 #include <ufprog/osdef.h>
 #include <ufprog/log.h>
 #include <ufprog/spi.h>
 
+#define CMD_RESET           0xFF
+#define CMD_READ_ID         0x9F
+#define CMD_WREN            0x06
+#define CMD_GET_FEATURE     0x0F
+#define CMD_SET_FEATURE     0x1F
+#define CMD_BLOCK_ERASE     0xD8
+#define CMD_PAGE_READ       0x13
+#define CMD_READ_CACHE      0x03
+
+#define REG_PROTECTION      0xA0
+#define REG_CONFIG          0xB0
+#define REG_STATUS          0xC0
+
+#define STATUS_OIP          0x01
+#define STATUS_WEL          0x02
+#define STATUS_E_FAIL       0x04
+#define STATUS_P_FAIL       0x08
+#define STATUS_ECC_MASK     0x30
+
+#define BLOCK_COUNT         1024
+#define PAGES_PER_BLOCK     64
+#define PAGE_SIZE           2048
+
+#define VERIFY_LEN          256
+#define VERIFY_RETRIES      3
+#define ERASE_TIMEOUT_MS    10000
+#define PAGE_READ_TIMEOUT_MS 5000
+
 static int transfer(struct ufprog_spi *spi,
-const uint8_t *tx, size_t txlen,
-uint8_t *rx, size_t rxlen)
+                    const uint8_t *tx, size_t txlen,
+                    uint8_t *rx, size_t rxlen)
 {
-struct ufprog_spi_transfer xfer[2] = {0};
-unsigned n = 0;
+    struct ufprog_spi_transfer xfer[2] = {0};
+    unsigned n = 0;
 
-if (txlen) {
-    xfer[n].buf.tx = tx;
-    xfer[n].len = txlen;
-    xfer[n].dir = SPI_DATA_OUT;
-    xfer[n].end = !rxlen;
-    n++;
-}
+    if (txlen) {
+        xfer[n].buf.tx = tx;
+        xfer[n].len = txlen;
+        xfer[n].dir = SPI_DATA_OUT;
+        xfer[n].end = !rxlen;
+        n++;
+    }
 
-if (rxlen) {
-    xfer[n].buf.rx = rx;
-    xfer[n].len = rxlen;
-    xfer[n].dir = SPI_DATA_IN;
-    xfer[n].end = true;
-    n++;
-}
+    if (rxlen) {
+        xfer[n].buf.rx = rx;
+        xfer[n].len = rxlen;
+        xfer[n].dir = SPI_DATA_IN;
+        xfer[n].end = true;
+        n++;
+    }
 
-return ufprog_spi_generic_xfer(spi, xfer, n);
+    if (!n)
+        return -1;
 
+    return ufprog_spi_generic_xfer(spi, xfer, n);
 }
 
 static int command(struct ufprog_spi *spi, uint8_t opcode)
 {
-return transfer(spi, &opcode, 1, NULL, 0);
+    return transfer(spi, &opcode, 1, NULL, 0);
 }
 
-static int read_feature(struct ufprog_spi *spi, uint8_t addr,
-const char *name, uint8_t *value)
+static int read_feature(struct ufprog_spi *spi,
+                        uint8_t addr,
+                        const char *name,
+                        uint8_t *value)
 {
-uint8_t tx[2] = {0x0F, addr};
-uint8_t rx = 0;
+    uint8_t tx[2] = {CMD_GET_FEATURE, addr};
+    uint8_t rx = 0;
 
-if (transfer(spi, tx, sizeof(tx), &rx, 1)) {
-    printf("%s: READ FAILED\n", name);
-    return -1;
+    if (transfer(spi, tx, sizeof(tx), &rx, 1)) {
+        printf("%-18s: READ FAILED\n", name);
+        return -1;
+    }
+
+    *value = rx;
+
+    printf("%-18s: %02X\n", name, rx);
+
+    return 0;
 }
 
-*value = rx;
+static int set_feature(struct ufprog_spi *spi,
+                       uint8_t addr,
+                       uint8_t value)
+{
+    uint8_t tx[3] = {
+        CMD_SET_FEATURE,
+        addr,
+        value
+    };
 
-printf("%-18s: %02X\n", name, rx);
-return 0;
+    return transfer(spi, tx, sizeof(tx), NULL, 0);
+}
 
+static void print_status(uint8_t status)
+{
+    printf("Status (C0)       : %02X\n", status);
+    printf("OIP    = %u\n", !!(status & STATUS_OIP));
+    printf("WEL    = %u\n", !!(status & STATUS_WEL));
+    printf("E_FAIL = %u\n", !!(status & STATUS_E_FAIL));
+    printf("P_FAIL = %u\n", !!(status & STATUS_P_FAIL));
+    printf("ECC    = %02X\n",
+           (status & STATUS_ECC_MASK) >> 4);
 }
 
 static int write_enable(struct ufprog_spi *spi)
 {
-uint8_t value;
+    uint8_t status;
 
-if (command(spi, 0x06)) {
-    printf("WRITE ENABLE failed\n");
-    return -1;
-}
+    printf("WRITE ENABLE\n");
 
-if (read_feature(spi, 0xC0, "Status", &value))
-    return -1;
+    if (command(spi, CMD_WREN)) {
+        printf("WRITE ENABLE failed\n");
+        return -1;
+    }
 
-printf("WEL = %u\n", (value >> 1) & 1);
-
-return ((value & 0x02) != 0) ? 0 : -1;
-
-}
-
-static int set_feature(struct ufprog_spi *spi, uint8_t addr, uint8_t value)
-{
-uint8_t tx[3] = {0x1F, addr, value};
-
-return transfer(spi, tx, sizeof(tx), NULL, 0);
-
-}
-
-static int wait_ready(struct ufprog_spi *spi)
-{
-unsigned i;
-uint8_t status;
-
-for (i = 0; i < 1000; i++) {
-    if (read_feature(spi, 0xC0, "Status", &status))
+    if (read_feature(spi, REG_STATUS, "Status", &status))
         return -1;
 
-    if (!(status & 0x01))
-        return 0;
+    printf("WEL = %u\n", !!(status & STATUS_WEL));
 
-    Sleep(1);
+    if (!(status & STATUS_WEL)) {
+        printf("ERROR: WEL did not become 1\n");
+        return -1;
+    }
+
+    return 0;
 }
 
-printf("TIMEOUT waiting for ready\n");
-return -1;
+static int wait_ready(struct ufprog_spi *spi,
+                      unsigned timeout_ms,
+                      uint8_t *final_status)
+{
+    unsigned elapsed;
 
+    for (elapsed = 0; elapsed < timeout_ms; elapsed++) {
+        uint8_t status;
+
+        if (read_feature(spi, REG_STATUS, "Status", &status))
+            return -1;
+
+        if (!(status & STATUS_OIP)) {
+            if (final_status)
+                *final_status = status;
+            return 0;
+        }
+
+        Sleep(1);
+    }
+
+    printf("TIMEOUT waiting for ready\n");
+
+    if (final_status)
+        *final_status = 0xFF;
+
+    return -1;
+}
+
+static int reset_chip(struct ufprog_spi *spi)
+{
+    printf("\nRESET\n");
+
+    if (command(spi, CMD_RESET)) {
+        printf("RESET FAILED\n");
+        return -1;
+    }
+
+    Sleep(2);
+
+    printf("RESET OK\n");
+
+    return 0;
 }
 
 static int read_id(struct ufprog_spi *spi)
 {
-uint8_t tx = 0x9F;
-uint8_t rx[8] = {0};
+    uint8_t tx = CMD_READ_ID;
+    uint8_t rx[8] = {0};
 
-if (transfer(spi, &tx, 1, rx, sizeof(rx))) {
-    printf("READ ID failed\n");
-    return -1;
+    if (transfer(spi, &tx, 1, rx, sizeof(rx))) {
+        printf("READ ID failed\n");
+        return -1;
+    }
+
+    printf("ID:");
+
+    for (unsigned i = 0; i < sizeof(rx); i++)
+        printf(" %02X", rx[i]);
+
+    printf("\n");
+
+    return 0;
 }
 
-printf("ID:");
-for (unsigned i = 0; i < sizeof(rx); i++)
-    printf(" %02X", rx[i]);
-printf("\n");
-
-return 0;
-
-}
-
-static void dump_result(const char *label, uint8_t value)
+static int block_erase(struct ufprog_spi *spi,
+                       uint32_t block)
 {
-printf("%s = %02X\n", label, value);
+    uint32_t row = block * PAGES_PER_BLOCK;
+
+    uint8_t tx[4];
+
+    tx[0] = CMD_BLOCK_ERASE;
+    tx[1] = (uint8_t)(row >> 16);
+    tx[2] = (uint8_t)(row >> 8);
+    tx[3] = (uint8_t)row;
+
+    printf("\n------------------------------------------------------------\n");
+    printf("ERASE BLOCK %u / %u\n", block, BLOCK_COUNT - 1);
+    printf("Row address: %02X %02X %02X\n",
+           tx[1], tx[2], tx[3]);
+
+    if (write_enable(spi)) {
+        printf("BLOCK %u: WRITE ENABLE FAILED\n", block);
+        return -1;
+    }
+
+    if (transfer(spi, tx, sizeof(tx), NULL, 0)) {
+        printf("BLOCK %u: ERASE COMMAND FAILED\n", block);
+        return -1;
+    }
+
+    printf("Erase command accepted.\n");
+    printf("Waiting for NAND to finish...\n");
+
+    uint8_t status;
+
+    if (wait_ready(spi, ERASE_TIMEOUT_MS, &status)) {
+        printf("BLOCK %u: ERASE TIMEOUT\n", block);
+        return -1;
+    }
+
+    printf("Erase completed.\n");
+    print_status(status);
+
+    if (status & STATUS_E_FAIL) {
+        printf("BLOCK %u: E_FAIL SET\n", block);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int page_read(struct ufprog_spi *spi,
+                     uint32_t page)
+{
+    uint8_t tx[4];
+
+    tx[0] = CMD_PAGE_READ;
+    tx[1] = (uint8_t)(page >> 16);
+    tx[2] = (uint8_t)(page >> 8);
+    tx[3] = (uint8_t)page;
+
+    printf("PAGE READ: %02X %02X %02X\n",
+           tx[1], tx[2], tx[3]);
+
+    if (transfer(spi, tx, sizeof(tx), NULL, 0)) {
+        printf("PAGE READ command failed\n");
+        return -1;
+    }
+
+    if (wait_ready(spi, PAGE_READ_TIMEOUT_MS, NULL)) {
+        printf("PAGE READ timeout\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int read_cache(struct ufprog_spi *spi,
+                       uint16_t column,
+                       uint8_t *data,
+                       size_t len)
+{
+    uint8_t tx[3];
+
+    tx[0] = CMD_READ_CACHE;
+    tx[1] = (uint8_t)(column >> 8);
+    tx[2] = (uint8_t)column;
+
+    if (transfer(spi, tx, sizeof(tx), data, len)) {
+        printf("READ CACHE failed\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int read_page_first_256(struct ufprog_spi *spi,
+                               uint32_t page,
+                               uint8_t *data)
+{
+    memset(data, 0, VERIFY_LEN);
+
+    if (page_read(spi, page))
+        return -1;
+
+    if (read_cache(spi, 0x0000, data, VERIFY_LEN))
+        return -1;
+
+    return 0;
+}
+
+static void dump_256(const uint8_t *data)
+{
+    printf("\nPAGE DATA - FIRST 256 BYTES\n\n");
+
+    for (size_t i = 0; i < VERIFY_LEN; i += 16) {
+        printf("%04zX:", i);
+
+        for (size_t j = 0; j < 16; j++)
+            printf(" %02X", data[i + j]);
+
+        printf("\n");
+    }
+}
+
+static int all_ff(const uint8_t *data, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] != 0xFF)
+            return 0;
+    }
+
+    return 1;
+}
+
+static int verify_block(struct ufprog_spi *spi,
+                        uint32_t block,
+                        int *first_bad_offset)
+{
+    uint8_t data[VERIFY_LEN];
+
+    uint32_t first_page = block * PAGES_PER_BLOCK;
+
+    /*
+     * Verify the first page of the block.
+     *
+     * This deliberately reads the NAND after erase instead of
+     * relying only on E_FAIL.
+     */
+
+    for (unsigned attempt = 0;
+         attempt < VERIFY_RETRIES;
+         attempt++) {
+
+        printf("\nVERIFY BLOCK %u - attempt %u/%u\n",
+               block,
+               attempt + 1,
+               VERIFY_RETRIES);
+
+        if (read_page_first_256(spi, first_page, data)) {
+            printf("BLOCK %u: PAGE READ FAILED\n", block);
+
+            if (attempt + 1 < VERIFY_RETRIES)
+                continue;
+
+            return -1;
+        }
+
+        if (all_ff(data, VERIFY_LEN)) {
+            printf("BLOCK %u: FIRST 256 BYTES ARE FF\n", block);
+
+            if (block == 0)
+                dump_256(data);
+
+            return 0;
+        }
+
+        printf("BLOCK %u: VERIFY FAILED\n", block);
+
+        for (size_t i = 0; i < VERIFY_LEN; i++) {
+            if (data[i] != 0xFF) {
+                printf("First non-FF byte: offset %04zX = %02X\n",
+                       i, data[i]);
+
+                if (first_bad_offset)
+                    *first_bad_offset = (int)i;
+
+                break;
+            }
+        }
+
+        /*
+         * Retry the page read. A transient cache/read problem
+         * should not immediately classify the block as failed.
+         */
+        if (attempt + 1 < VERIFY_RETRIES)
+            Sleep(10);
+    }
+
+    return 1;
+}
+
+static int force_clear_protection(struct ufprog_spi *spi)
+{
+    uint8_t protection;
+
+    if (read_feature(spi,
+                     REG_PROTECTION,
+                     "Protection (A0)",
+                     &protection))
+        return -1;
+
+    printf("\nCurrent A0: %02X\n", protection);
+
+    if (protection == 0x00) {
+        printf("Protection already cleared.\n");
+        return 0;
+    }
+
+    printf("Setting A0: 00\n");
+
+    if (write_enable(spi))
+        return -1;
+
+    if (set_feature(spi, REG_PROTECTION, 0x00)) {
+        printf("SET FEATURE A0 failed\n");
+        return -1;
+    }
+
+    if (wait_ready(spi, 1000, NULL))
+        return -1;
+
+    if (read_feature(spi,
+                     REG_PROTECTION,
+                     "Protection (A0)",
+                     &protection))
+        return -1;
+
+    if (protection != 0x00) {
+        printf("ERROR: protection register did not clear\n");
+        return -1;
+    }
+
+    printf("Protection cleared successfully.\n");
+
+    return 0;
+}
+
+static int erase_block_with_retry(struct ufprog_spi *spi,
+                                  uint32_t block)
+{
+    int verify_result;
+    int bad_offset = -1;
+
+    /*
+     * First erase attempt.
+     */
+    if (block_erase(spi, block)) {
+        printf("BLOCK %u: INITIAL ERASE FAILED\n", block);
+    } else {
+        verify_result = verify_block(spi, block, &bad_offset);
+
+        if (verify_result == 0) {
+            printf("BLOCK %u: ERASE VERIFIED\n", block);
+            return 0;
+        }
+
+        if (verify_result < 0)
+            printf("BLOCK %u: VERIFY READ ERROR\n", block);
+        else
+            printf("BLOCK %u: ERASE VERIFY FAILED\n", block);
+    }
+
+    /*
+     * Re-reset before retrying the erase.
+     */
+    printf("\nBLOCK %u: RETRY PATH\n", block);
+
+    if (reset_chip(spi))
+        return -1;
+
+    /*
+     * Clear protection again in case the device reset changed
+     * protection state.
+     */
+    if (force_clear_protection(spi))
+        printf("Protection clear retry returned an error.\n");
+
+    /*
+     * Second erase attempt.
+     */
+    printf("\nBLOCK %u: SECOND ERASE ATTEMPT\n", block);
+
+    if (block_erase(spi, block)) {
+        printf("BLOCK %u: SECOND ERASE FAILED\n", block);
+    } else {
+        verify_result = verify_block(spi, block, &bad_offset);
+
+        if (verify_result == 0) {
+            printf("BLOCK %u: ERASE VERIFIED ON SECOND ATTEMPT\n",
+                   block);
+            return 0;
+        }
+    }
+
+    /*
+     * Third attempt after another reset.
+     */
+    printf("\nBLOCK %u: THIRD ERASE ATTEMPT\n", block);
+
+    if (reset_chip(spi))
+        return -1;
+
+    if (force_clear_protection(spi))
+        printf("Protection clear retry returned an error.\n");
+
+    if (block_erase(spi, block)) {
+        printf("BLOCK %u: THIRD ERASE FAILED\n", block);
+        return -1;
+    }
+
+    verify_result = verify_block(spi, block, &bad_offset);
+
+    if (verify_result == 0) {
+        printf("BLOCK %u: ERASE VERIFIED ON THIRD ATTEMPT\n",
+               block);
+        return 0;
+    }
+
+    if (bad_offset >= 0) {
+        printf("BLOCK %u: persistent non-FF data at offset %04X\n",
+               block, bad_offset);
+    }
+
+    return -1;
 }
 
 int wmain(void)
 {
-struct ufprog_spi *spi = NULL;
-ufprog_status ret;
-uint8_t original_b0 = 0;
-uint8_t test_b0;
-uint8_t status;
+    struct ufprog_spi *spi = NULL;
+    ufprog_status ret;
 
-set_os_default_log_print();
-os_init();
+    uint8_t status;
+    uint8_t config;
+    uint8_t protection;
 
-printf("=== ESMT F50L1G41LB FEATURE / DEVICE RESPONSE TEST ===\n");
-printf("NO PROGRAM / NO ERASE\n\n");
+    unsigned failed_blocks = 0;
+    uint32_t failed_block_list[BLOCK_COUNT];
 
-ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
-if (ret) {
-    fprintf(stderr, "open failed: %u\n", ret);
-    return 1;
-}
+    set_os_default_log_print();
+    os_init();
 
-printf("RESET\n");
+    printf("============================================================\n");
+    printf(" ESMT F50L1G41LB FULL CHIP ERASE + VERIFY\n");
+    printf("============================================================\n\n");
 
-if (command(spi, 0xFF)) {
-    printf("RESET FAILED\n");
+    printf("WARNING: THIS IS DESTRUCTIVE.\n");
+    printf("ALL %u BLOCKS WILL BE ERASED.\n", BLOCK_COUNT);
+    printf("VERIFY: FIRST 256 BYTES OF FIRST PAGE OF EACH BLOCK.\n\n");
+
+    ret = ufprog_spi_open_device("ch341-libusb", false, &spi);
+
+    if (ret) {
+        fprintf(stderr,
+                "ERROR: unable to open ch341-libusb: %u\n",
+                ret);
+        return 1;
+    }
+
+    printf("Controller opened successfully.\n");
+
+    if (reset_chip(spi))
+        goto cleanup_fail;
+
+    printf("\nREAD ID\n");
+    read_id(spi);
+
+    printf("\nFEATURES BEFORE ERASE\n");
+
+    if (read_feature(spi,
+                     REG_PROTECTION,
+                     "Protection (A0)",
+                     &protection))
+        goto cleanup_fail;
+
+    if (read_feature(spi,
+                     REG_CONFIG,
+                     "Configuration (B0)",
+                     &config))
+        goto cleanup_fail;
+
+    if (read_feature(spi,
+                     REG_STATUS,
+                     "Status (C0)",
+                     &status))
+        goto cleanup_fail;
+
+    printf("\n");
+
+    if (force_clear_protection(spi)) {
+        printf("\nWARNING: unable to verify protection clear.\n");
+        printf("Continuing with erase attempts.\n");
+    }
+
+    printf("\n============================================================\n");
+    printf(" STARTING FULL CHIP ERASE\n");
+    printf("============================================================\n");
+
+    for (uint32_t block = 0;
+         block < BLOCK_COUNT;
+         block++) {
+
+        printf("\n\n");
+        printf("############################################################\n");
+        printf("# BLOCK %u / %u\n",
+               block,
+               BLOCK_COUNT - 1);
+        printf("############################################################\n");
+
+        if (reset_chip(spi)) {
+            printf("BLOCK %u: RESET FAILED\n", block);
+
+            failed_block_list[failed_blocks++] = block;
+            continue;
+        }
+
+        if (read_feature(spi,
+                         REG_PROTECTION,
+                         "Protection (A0)",
+                         &protection)) {
+
+            printf("BLOCK %u: unable to read protection\n",
+                   block);
+
+            failed_block_list[failed_blocks++] = block;
+            continue;
+        }
+
+        if (protection != 0x00) {
+
+            printf("BLOCK %u: protection = %02X\n",
+                   block,
+                   protection);
+
+            if (force_clear_protection(spi)) {
+
+                printf("BLOCK %u: unable to clear protection\n",
+                       block);
+
+                failed_block_list[failed_blocks++] = block;
+                continue;
+            }
+        }
+
+        if (erase_block_with_retry(spi, block)) {
+
+            printf("\n*** BLOCK %u FAILED ERASE/VERIFY ***\n",
+                   block);
+
+            failed_block_list[failed_blocks++] = block;
+
+        } else {
+
+            printf("\n*** BLOCK %u ERASE VERIFIED ***\n",
+                   block);
+        }
+    }
+
+    printf("\n\n");
+    printf("============================================================\n");
+    printf(" FULL CHIP ERASE FINISHED\n");
+    printf("============================================================\n\n");
+
+    printf("Total blocks : %u\n", BLOCK_COUNT);
+    printf("Failed blocks: %u\n", failed_blocks);
+
+    if (failed_blocks == 0) {
+
+        printf("\n*** ALL %u BLOCKS ERASED AND VERIFIED ***\n",
+               BLOCK_COUNT);
+
+    } else {
+
+        printf("\n*** FAILED BLOCK LIST ***\n");
+
+        for (unsigned i = 0; i < failed_blocks; i++) {
+            uint32_t block = failed_block_list[i];
+            uint32_t first_page = block * PAGES_PER_BLOCK;
+            uint32_t last_page =
+                first_page + PAGES_PER_BLOCK - 1;
+
+            printf("  Block %4u  "
+                   "(pages %5u - %5u)\n",
+                   block,
+                   first_page,
+                   last_page);
+        }
+
+        printf("\n*** ERASE COMPLETED WITH FAILURES ***\n");
+    }
+
+    if (reset_chip(spi))
+        printf("FINAL RESET FAILED\n");
+    else
+        printf("FINAL RESET OK\n");
+
+    printf("\nFINAL FEATURES\n");
+
+    read_feature(spi,
+                 REG_PROTECTION,
+                 "Protection (A0)",
+                 &status);
+
+    read_feature(spi,
+                 REG_CONFIG,
+                 "Configuration (B0)",
+                 &status);
+
+    read_feature(spi,
+                 REG_STATUS,
+                 "Status (C0)",
+                 &status);
+
+    printf("\nFINAL READ ID\n");
+    read_id(spi);
+
     ufprog_spi_close_device(spi);
+
+    printf("\n=== FULL CHIP ERASE COMPLETE ===\n");
+
+    return failed_blocks ? 2 : 0;
+
+cleanup_fail:
+
+    if (spi)
+        ufprog_spi_close_device(spi);
+
+    printf("\n=== FULL CHIP ERASE ABORTED ===\n");
+
     return 1;
-}
-
-Sleep(2);
-
-printf("RESET OK\n\n");
-
-printf("FEATURES BEFORE TEST\n");
-
-if (read_feature(spi, 0xA0, "Protection (A0)", &status))
-    goto cleanup;
-
-if (read_feature(spi, 0xB0, "Configuration (B0)", &original_b0))
-    goto cleanup;
-
-if (read_feature(spi, 0xC0, "Status (C0)", &status))
-    goto cleanup;
-
-printf("\n");
-
-printf("READ ID BEFORE FEATURE TEST\n");
-read_id(spi);
-
-printf("\n");
-printf("========================================\n");
-printf("SAFE FEATURE WRITE / READBACK TEST\n");
-printf("========================================\n\n");
-
-/*
- * B0 is the configuration register.
- *
- * We first verify that the device accepts WREN and that the WEL
- * bit changes. Then we write the same B0 value back to the device.
- *
- * This deliberately does NOT touch NAND array data.
- */
-
-test_b0 = original_b0;
-
-printf("Original B0: %02X\n", original_b0);
-printf("Test B0:     %02X\n\n", test_b0);
-
-printf("WRITE ENABLE\n");
-
-if (write_enable(spi)) {
-    printf("WRITE ENABLE / WEL TEST FAILED\n");
-    goto cleanup;
-}
-
-printf("\nSET FEATURE B0 = %02X\n", test_b0);
-
-if (set_feature(spi, 0xB0, test_b0)) {
-    printf("SET FEATURE failed\n");
-    goto cleanup;
-}
-
-if (wait_ready(spi))
-    goto cleanup;
-
-printf("\nVERIFY B0\n");
-
-if (read_feature(spi, 0xB0, "Configuration (B0)", &status))
-    goto cleanup;
-
-dump_result("B0 readback", status);
-
-if (status == original_b0)
-    printf("B0 WRITE/READBACK VERIFIED\n");
-else
-    printf("B0 WRITE/READBACK MISMATCH\n");
-
-printf("\nREAD ID AFTER FEATURE WRITE\n");
-read_id(spi);
-
-printf("\nRESET\n");
-
-if (command(spi, 0xFF)) {
-    printf("RESET FAILED\n");
-    goto cleanup;
-}
-
-Sleep(2);
-
-printf("RESET OK\n\n");
-
-printf("FINAL FEATURES\n");
-
-read_feature(spi, 0xA0, "Protection (A0)", &status);
-read_feature(spi, 0xB0, "Configuration (B0)", &status);
-read_feature(spi, 0xC0, "Status (C0)", &status);
-
-printf("\nFINAL READ ID\n");
-read_id(spi);
-
-cleanup:
-ufprog_spi_close_device(spi);
-
-printf("\n=== TEST COMPLETE ===\n");
-
-return 0;
-
 }
